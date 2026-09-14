@@ -1,0 +1,797 @@
+<!DOCTYPE html><html lang="en"><head>
+    <base href="https://cdn.jsdelivr.net/gh/ccported/games@68a06c5354670671f783001244065d1b45225074/game_d6c3_a1f514e521dd4/">
+<script>
+    (function () {
+        // V6
+        var base = document.querySelector('base');
+        var CDN_BASE = base ? base.href : '';
+        if (!CDN_BASE) {
+            console.log('CDN_BASE not found.');
+            return;
+        }
+        console.log('CDN_BASE:', CDN_BASE);
+
+        // Transfer notification system
+        let transferNotification = null;
+        let hideTimeout = null;
+        let requestsToMake = 0;
+        let requestsCompleted = 0;
+        let totalBytesTransferred = 0;
+        let bytesToTransfer = 0;
+
+        function createNotification() {
+            if (transferNotification) return transferNotification;
+
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                color: white;
+                padding: 12px 16px;
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 12px;
+                z-index: 10000;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                min-width: 200px;
+                transition: all 0.3s ease;
+            `;
+            document.body.appendChild(notification);
+            transferNotification = notification;
+            return notification;
+        }
+
+        function updateNotification() {
+            if (!transferNotification) return;
+
+            const progress = requestsToMake > 0 ? (requestsCompleted / requestsToMake) * 100 : 0;
+            const transferredMB = (totalBytesTransferred / 1024 / 1024).toFixed(1);
+            const estimatedMB = (bytesToTransfer / 1024 / 1024).toFixed(1);
+
+            transferNotification.innerHTML = `
+                <div style="margin-bottom: 4px;">📦 Merging split files</div>
+                <div style="margin-bottom: 4px;">Parts: ${requestsCompleted}/${requestsToMake}</div>
+                <div style="margin-bottom: 6px;">Data: ${transferredMB}MB${bytesToTransfer > 0 ? ' / ' + estimatedMB + 'MB' : ''}</div>
+                <div style="background: rgba(255,255,255,0.2); height: 4px; border-radius: 2px; overflow: hidden;">
+                    <div style="background: #4CAF50; height: 100%; width: ${progress}%; transition: width 0.3s ease;"></div>
+                </div>
+            `;
+        }
+
+        function showNotification() {
+            const notification = createNotification();
+            notification.style.opacity = '1';
+            notification.style.transform = 'translateX(0)';
+            updateNotification();
+
+            // Clear any existing hide timeout
+            if (hideTimeout) {
+                clearTimeout(hideTimeout);
+                hideTimeout = null;
+            }
+        }
+
+        function scheduleHide() {
+            if (hideTimeout) clearTimeout(hideTimeout);
+
+            hideTimeout = setTimeout(() => {
+                if (transferNotification) {
+                    transferNotification.style.opacity = '0';
+                    transferNotification.style.transform = 'translateX(100%)';
+                    setTimeout(() => {
+                        if (transferNotification) {
+                            transferNotification.remove();
+                            transferNotification = null;
+                        }
+                        // Reset counters
+                        requestsToMake = 0;
+                        requestsCompleted = 0;
+                        totalBytesTransferred = 0;
+                        bytesToTransfer = 0;
+                    }, 300);
+                }
+            }, 5000);
+        }
+
+        function trackPartFound(partUrl) {
+            requestsToMake++;
+            showNotification();
+
+            // Asynchronously get the content-length
+            origFetch(partUrl, { method: 'HEAD' })
+                .then(response => {
+                    if (response.ok) {
+                        const contentLength = response.headers.get('content-length');
+                        if (contentLength) {
+                            bytesToTransfer += parseInt(contentLength);
+                            updateNotification();
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.log('Failed to get HEAD for', partUrl, error);
+                });
+        }
+
+        function trackPartCompleted(partSize) {
+            requestsCompleted++;
+            totalBytesTransferred += partSize;
+            updateNotification();
+
+            if (requestsCompleted >= requestsToMake) {
+                scheduleHide();
+            }
+        }
+
+        // Helper to check if a URL is relative
+        function isRelative(url) {
+            const result = typeof url === 'string' && !/^(?:[a-z]+:)?\/\//i.test(url) && url[0] !== '/';
+            return result;
+        }
+
+        // Patch fetch
+        var origFetch = window.fetch;
+        window.fetch = async function (input, init) {
+            if (typeof input === 'string' && isRelative(input)) {
+                input = CDN_BASE + input;
+            } else if (input && input.url && isRelative(input.url)) {
+                input = new Request(CDN_BASE + input.url, input);
+            }
+            const response = origFetch.call(this, input, init);
+            const res = await response;
+
+
+            if (res.status === 403) {
+                const body = await res.text();
+                const toLargeText = `File size exceeded the configured limit of 20 MB`;
+                if (body.includes(toLargeText)) {
+                    console.log('fetch: file too large, merging parts for', input instanceof Request ? input.url : input);
+                    try {
+                        return await merge(input instanceof Request ? input.url : input);
+                    } catch (mergeError) {
+                        console.error('fetch merge failed:', mergeError);
+                        return res; // Return the original 403 response
+                    }
+                } else {
+                    console.log('fetch: other 403 error');
+                    return res;
+                }
+            }
+            return res;
+        };
+
+        // Patch XMLHttpRequest
+        var OrigXHR = window.XMLHttpRequest;
+        function PatchedXHR() {
+            var xhr = new OrigXHR();
+            var origOpen = xhr.open;
+            var origSend = xhr.send;
+
+            var _url;
+            var _originalResponseType = '';
+            var _responseTypeSet = false;
+
+            xhr.open = function (method, url) {
+                if (isRelative(url)) {
+                    url = CDN_BASE + url;
+                }
+                _url = url;
+                return origOpen.apply(xhr, arguments);
+            };
+
+            // Override responseType property
+            Object.defineProperty(xhr, 'responseType', {
+                get: function () {
+                    return _originalResponseType;
+                },
+                set: function (value) {
+                    _originalResponseType = value;
+                    _responseTypeSet = true;
+                    // Set it on the actual XHR immediately for normal requests
+                    try {
+                        Object.getPrototypeOf(xhr).constructor.prototype.__lookupSetter__('responseType').call(xhr, value);
+                    } catch (e) {
+                        // Fallback if direct prototype access fails
+                        xhr.__proto__.responseType = value;
+                    }
+                },
+                configurable: true
+            });
+
+            xhr.send = function () {
+
+                var origOnReadyStateChange = xhr.onreadystatechange;
+                var origOnLoad = xhr.onload;
+                var origOnError = xhr.onerror;
+
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState === 4) {
+                        if (xhr.status === 403) {
+                            // Prevent original callbacks from firing during our check
+                            xhr.onreadystatechange = null;
+                            xhr.onload = null;
+                            xhr.onerror = null;
+
+                            // Make a separate fetch request to check the error message using original fetch
+                            origFetch(_url).then(response => {
+                                if (response.status === 403) {
+                                    return response.text().then(body => {
+                                        const toLargeText = `File size exceeded the configured limit of 20 MB`;
+
+                                        if (body.includes(toLargeText)) {
+                                            return merge(_url).then(mergedRes => {
+                                                if (_originalResponseType === 'arraybuffer') {
+                                                    return mergedRes.arrayBuffer().then(buffer => {
+                                                        // Mock successful response
+                                                        Object.defineProperty(xhr, 'status', {
+                                                            value: 200,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'response', {
+                                                            value: buffer,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'readyState', {
+                                                            value: 4,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+
+                                                        // Restore and trigger callbacks
+                                                        xhr.onreadystatechange = origOnReadyStateChange;
+                                                        xhr.onload = origOnLoad;
+                                                        xhr.onerror = origOnError;
+
+                                                        if (origOnLoad) {
+                                                            setTimeout(() => origOnLoad.call(xhr), 0);
+                                                        }
+                                                        if (origOnReadyStateChange) {
+                                                            setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                        }
+                                                    });
+                                                } else {
+                                                    return mergedRes.text().then(text => {
+                                                        Object.defineProperty(xhr, 'status', {
+                                                            value: 200,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'response', {
+                                                            value: text,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'responseText', {
+                                                            value: text,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'readyState', {
+                                                            value: 4,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+
+                                                        // Restore and trigger callbacks
+                                                        xhr.onreadystatechange = origOnReadyStateChange;
+                                                        xhr.onload = origOnLoad;
+                                                        xhr.onerror = origOnError;
+
+                                                        if (origOnLoad) {
+                                                            setTimeout(() => origOnLoad.call(xhr), 0);
+                                                        }
+                                                        if (origOnReadyStateChange) {
+                                                            setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                        }
+                                                    });
+                                                }
+                                            }).catch(mergeError => {
+                                                console.error('Merge failed:', mergeError);
+                                                // Restore callbacks and let the original 403 error through
+                                                xhr.onreadystatechange = origOnReadyStateChange;
+                                                xhr.onload = origOnLoad;
+                                                xhr.onerror = origOnError;
+                                                if (origOnReadyStateChange) {
+                                                    setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                }
+                                            });
+                                        } else {
+                                            // Not a file size error, restore original callbacks and let it fail normally
+                                            xhr.onreadystatechange = origOnReadyStateChange;
+                                            xhr.onload = origOnLoad;
+                                            xhr.onerror = origOnError;
+                                            if (origOnReadyStateChange) {
+                                                setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    // Shouldn't happen, but restore callbacks
+                                    xhr.onreadystatechange = origOnReadyStateChange;
+                                    xhr.onload = origOnLoad;
+                                    xhr.onerror = origOnError;
+                                    if (origOnReadyStateChange) {
+                                        setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                    }
+                                }
+                            }).catch(error => {
+                                console.error('Error checking 403 response:', error);
+                                // Restore callbacks and trigger error
+                                xhr.onreadystatechange = origOnReadyStateChange;
+                                xhr.onload = origOnLoad;
+                                xhr.onerror = origOnError;
+                                if (origOnError) {
+                                    setTimeout(() => origOnError.call(xhr), 0);
+                                }
+                            });
+
+                            return; // Don't call original callback yet
+                        }
+                    }
+
+                    if (origOnReadyStateChange) origOnReadyStateChange.call(xhr);
+                };
+
+                return origSend.apply(xhr, arguments);
+            };
+
+            return xhr;
+        }
+        PatchedXHR.prototype = OrigXHR.prototype;
+        window.XMLHttpRequest = PatchedXHR;
+
+        async function merge(filename) {
+
+            const BATCH_SIZE = 3;
+            let allParts = [];
+            let partIndex = 1;
+            let availableParts = []; // Track which parts actually exist
+
+            // First, discover all available parts
+            while (true) {
+                // Create batch of part requests to check availability
+                const batchPromises = [];
+                const batchStartIndex = partIndex;
+
+                for (let i = 0; i < BATCH_SIZE; i++) {
+                    const currentPartIndex = partIndex + i;
+                    const partFilename = `${filename}.part${currentPartIndex}`;
+
+                    batchPromises.push(
+                        origFetch(partFilename, { method: 'HEAD' })
+                            .then(response => ({
+                                index: currentPartIndex,
+                                url: partFilename,
+                                exists: response.ok
+                            }))
+                            .catch(error => ({
+                                index: currentPartIndex,
+                                url: partFilename,
+                                exists: false
+                            }))
+                    );
+                }
+
+                const batchResults = await Promise.all(batchPromises);
+                let foundInBatch = 0;
+
+                for (const result of batchResults) {
+                    if (result.exists) {
+                        availableParts.push(result.index);
+                        trackPartFound(result.url);
+                        foundInBatch++;
+                    } else {
+                        break; // Stop when we hit the first missing part
+                    }
+                }
+
+                if (foundInBatch < BATCH_SIZE) {
+                    break;
+                }
+
+                partIndex += BATCH_SIZE;
+            }
+
+            if (availableParts.length === 0) {
+                throw new Error('No parts found for merging');
+            }
+
+
+            // Now fetch all the parts we discovered in batches
+            for (let i = 0; i < availableParts.length; i += BATCH_SIZE) {
+                const batchParts = availableParts.slice(i, i + BATCH_SIZE);
+                const batchPromises = [];
+
+                for (const partIndex of batchParts) {
+                    const partFilename = `${filename}.part${partIndex}`;
+
+                    batchPromises.push(
+                        origFetch(partFilename)
+                            .then(async response => {
+                                if (response.ok) {
+                                    const partData = await response.arrayBuffer();
+                                    trackPartCompleted(partData.byteLength);
+                                    return {
+                                        index: partIndex,
+                                        data: partData,
+                                        success: true
+                                    };
+                                } else {
+                                    throw new Error(`Failed to fetch part ${partIndex}`);
+                                }
+                            })
+                            .catch(error => ({
+                                index: partIndex,
+                                data: null,
+                                success: false,
+                                error: error
+                            }))
+                    );
+                }
+
+                const batchResults = await Promise.all(batchPromises);
+
+                // Process batch results
+                for (const result of batchResults) {
+                    if (result.success) {
+                        allParts.push({
+                            index: result.index,
+                            data: result.data
+                        });
+                    } else {
+                        console.error(`Failed to fetch part ${result.index}:`, result.error);
+                        throw new Error(`Failed to fetch part ${result.index}`);
+                    }
+                }
+            }
+
+            // Sort parts by index to ensure correct order
+            allParts.sort((a, b) => a.index - b.index);
+
+            const totalSize = allParts.reduce((acc, part) => acc + part.data.byteLength, 0);
+            const combinedData = new Uint8Array(totalSize);
+
+            let offset = 0;
+            for (const part of allParts) {
+                combinedData.set(new Uint8Array(part.data), offset);
+                offset += part.data.byteLength;
+            }
+
+            return new Response(combinedData);
+        }
+
+
+        if (navigator && navigator.serviceWorker) {
+            const oldRegister = navigator.serviceWorker.register;
+            navigator.serviceWorker.register = async function (scriptURL, options) {
+                if (scriptURL && typeof scriptURL === 'string') {
+                    if (isRelative(scriptURL)) {
+                        const cdnURL = CDN_BASE + scriptURL;
+                        console.log('Service worker needs CDN URL:', cdnURL);
+                        
+                        // Create a proxy service worker that imports from CDN
+                        // Since service workers must be same-origin, we create a local proxy
+                        const proxyWorkerCode = `
+                            // Proxy service worker for CDN content
+                            self.addEventListener('install', function(event) {
+                                console.log('Proxy service worker installing');
+                                self.skipWaiting();
+                            });
+
+                            self.addEventListener('activate', function(event) {
+                                console.log('Proxy service worker activating');
+                                event.waitUntil(self.clients.claim());
+                            });
+
+                            // Import and execute the actual service worker from CDN
+                            fetch('${cdnURL}')
+                                .then(response => response.text())
+                                .then(code => {
+                                    // Execute the CDN service worker code in this context
+                                    eval(code);
+                                })
+                                .catch(error => {
+                                    console.error('Failed to load service worker from CDN:', error);
+                                });
+                        `;
+                        
+                        const blob = new Blob([proxyWorkerCode], { type: 'application/javascript' });
+                        const blobURL = URL.createObjectURL(blob);
+                        console.log('Proxy service worker blob created:', blobURL);
+                        return oldRegister.call(navigator.serviceWorker, blobURL, options);
+                    }
+                }
+                return oldRegister.call(navigator.serviceWorker, scriptURL, options);
+            }
+        }
+
+        // Patch Worker to allow remote origins
+        if (window.Worker) {
+            const OrigWorker = window.Worker;
+            window.Worker = function (scriptURL, options) {
+                // Don't patch blob URLs or data URLs - they're already valid
+                if (scriptURL && typeof scriptURL === 'string' && 
+                    !scriptURL.startsWith('blob:') && 
+                    !scriptURL.startsWith('data:') && 
+                    isRelative(scriptURL)) {
+                    scriptURL = CDN_BASE + scriptURL;
+                    console.log('Worker scriptURL patched to:', scriptURL);
+                }
+                
+                // If scriptURL is remote HTTPS/HTTP, we need to fetch and create data URL
+                if (typeof scriptURL === 'string' && /^https?:\/\//.test(scriptURL)) {
+                    console.log(scriptURL, 'is remote, creating data URL worker');
+                    
+                    // Extract the base URL for the worker to use
+                    const workerBaseURL = scriptURL.substring(0, scriptURL.lastIndexOf('/') + 1);
+                    
+                    // Create a worker with CDN context and fetch patching
+                    const workerCode = `
+                        // Set up CDN base for this worker
+                        const WORKER_CDN_BASE = '${workerBaseURL}';
+                        
+                        // Patch fetch in worker context to handle relative URLs
+                        const origWorkerFetch = self.fetch;
+                        self.fetch = function(input, init) {
+                            if (typeof input === 'string' && !/^(?:[a-z]+:)?\\/\\//i.test(input) && input[0] !== '/') {
+                                // Relative URL, prepend CDN base
+                                input = WORKER_CDN_BASE + input;
+                                console.log('Worker fetch patched to:', input);
+                            }
+                            return origWorkerFetch.call(this, input, init);
+                        };
+                        
+                        // Load the actual worker script
+                        fetch('${scriptURL}')
+                            .then(response => response.text())
+                            .then(code => {
+                                console.log('Worker script loaded, executing...');
+                                // Execute the CDN worker code with patched fetch
+                                eval(code);
+                            })
+                            .catch(error => {
+                                console.error('Failed to load worker script from CDN:', error);
+                                self.postMessage({error: 'Failed to load worker script', details: error.message});
+                            });
+                    `;
+                    
+                    // Create data URL instead of blob
+                    const encodedWorkerCode = encodeURIComponent(workerCode);
+                    const dataURL = `data:application/javascript,${encodedWorkerCode}`;
+                    return new OrigWorker(dataURL, options);
+                }
+                return new OrigWorker(scriptURL, options);
+            };
+            window.Worker.prototype = OrigWorker.prototype;
+        }
+    })();
+</script>
+		
+<!-- Component components/gtag_events -->
+
+<!-- End component components/gtag_events -->
+
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta http-equiv="pragma" content="no-cache">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta charset="utf-8">
+
+        <!-- Set the title bar of the page -->
+        <title>Iron Snout | Unblocked on CCPorted</title>
+		<meta name="description" content="Punch, kick, and flip your way through an endless horde of wolves. Dodge axes and throw them right back to the wolves to show them who is boss.">
+		<script src="patch/js/poki-sdk.js"></script>
+        
+        <script>
+        (()=>{var e=function(e){var n=RegExp("[?&]"+e+"=([^&]*)").exec(window.location.search);return n&&decodeURIComponent(n[1].replace(/\+/g," "))},n="kids"===e("tag"),t=new(function(){function e(){var e=this;this.queue=[],this.init=function(n){return void 0===n&&(n={}),new Promise((function(t,o){e.enqueue("init",n,t,o)}))},this.rewardedBreak=function(){return new Promise((function(e){e(!1)}))},this.noArguments=function(n){return function(){e.enqueue(n)}},this.oneArgument=function(n){return function(t){e.enqueue(n,t)}},this.handleAutoResolvePromise=function(){return new Promise((function(e){e()}))},this.throwNotLoaded=function(){console.debug("PokiSDK is not loaded yet. Not all methods are available.")}}return e.prototype.enqueue=function(e,t,o,i){var r={fn:e,options:t,resolveFn:o,rejectFn:i};n?i&&i():this.queue.push(r)},e.prototype.dequeue=function(){for(var e=function(){var e=n.queue.shift(),t=e,o=t.fn,i=t.options;"function"==typeof window.PokiSDK[o]?(null==e?void 0:e.resolveFn)||(null==e?void 0:e.rejectFn)?window.PokiSDK[o](i).then((function(){for(var n=[],t=0;t<arguments.length;t++)n[t]=arguments[t];"function"==typeof e.resolveFn&&e.resolveFn.apply(e,n)})).catch((function(){for(var n=[],t=0;t<arguments.length;t++)n[t]=arguments[t];"function"==typeof e.rejectFn&&e.rejectFn.apply(e,n)})):void 0!==(null==e?void 0:e.fn)&&window.PokiSDK[o](i):console.error("Cannot execute "+e.fn)},n=this;this.queue.length>0;)e()},e}());window.PokiSDK={init:t.init,initWithVideoHB:t.init,customEvent:t.throwNotLoaded,commercialBreak:t.handleAutoResolvePromise,rewardedBreak:t.rewardedBreak,displayAd:t.throwNotLoaded,destroyAd:t.throwNotLoaded,getLeaderboard:t.handleAutoResolvePromise,getSharableURL:function(){return new Promise((function(e,n){return n()}))},getURLParam:function(n){return e("gd"+n)||e(n)||""}},["gameLoadingStart","gameLoadingFinished","gameInteractive","roundStart","roundEnd","muteAd"].forEach((function(e){window.PokiSDK[e]=t.noArguments(e)})),["setDebug","gameplayStart","gameplayStop","gameLoadingProgress","happyTime","setPlayerAge","logError","sendHighscore","setDebugTouchOverlayController"].forEach((function(e){window.PokiSDK[e]=t.oneArgument(e)}));var o,i=((o=window.pokiSDKVersion)||(o=e("ab")||"v2.266.0"),"patch/js/poki-sdk.js?"+(n?"kids":"core")+"-"+o+".js"),r=document.createElement("script");r.setAttribute("src",i),r.setAttribute("type","text/javascript"),r.setAttribute("crossOrigin","anonymous"),r.onload=function(){return t.dequeue()},document.head.appendChild(r)})();
+        </script>
+        
+        <!-- Ad Check -->
+        
+        <style>
+            html {
+                height: 100%;
+                width: 100%;
+            }
+            
+            body {
+              background: #e7846b;
+              color:#cccccc;
+              margin: 0px;
+              padding: 0px;
+              border: 0px;
+			  overflow:hidden;
+                
+              height:100%;
+                
+              background-image: url('html5game/wolf.gif');
+              background-repeat: no-repeat;
+              background-position: center 100px;
+            }
+            
+            canvas {
+				  image-rendering: optimizeSpeed;
+				  -webkit-interpolation-mode: nearest-neighbor;
+				  -ms-touch-action: none;
+				  margin: 0px;
+				  padding: 0px;
+				  border: 0px;
+				  display:none;
+            }
+			
+			#bar {
+				position:fixed;
+				width:50%;
+				left:0;
+				right:0;
+				margin:0 auto;
+				padding:2px;
+				height: 28px;
+				top:352px;
+				background:#5a3a32;
+				z-index:-9999;
+			}
+			
+	
+			
+			#fill {
+				position:relative;
+				width:1%;
+				background-color:#ffffff;
+				height:28px;
+				margin:0px;
+			}
+			
+			#fill img {
+				position:absolute;
+				z-index:1;
+				right:-32px;
+				top:-2px;
+			}
+		
+            			
+				
+			#canvas, canvas {
+				-webkit-tap-highlight-color: transparent;
+				-webkit-touch-callout: none;
+				-webkit-user-select: none;
+				-khtml-user-select: none;
+				-moz-user-select: none;
+				-ms-user-select: none;
+				user-select: none;
+			}
+			
+            
+            :-webkit-full-screen #canvas {
+                 width: 100%;
+                 height: 100%;
+            }
+			
+            div.gm4html5_div_class {
+              margin: 0px;
+              padding: 0px;
+              border: 0px;
+            }
+        </style>
+    <script>(()=>{
+                        const script = document.createElement('script');
+                        window.gameID = "undefined";
+                        window.ccPorted = {
+                            gameID: "undefined"
+                        }
+                        script.src = '/big_game_script.js?cacheBust='+new Date().getTime();
+                        document.head.appendChild(script);
+                    })()</script></head>
+
+    <body>
+        <div class="gm4html5_div_class" id="gm4html5_div_id">
+            <!-- Create the canvas element the game draws to -->
+            <canvas id="canvas" width="1024" height="576">
+               <p>Your browser doesn't support HTML5 canvas.</p>
+            </canvas>
+			
+			<script type="text/javascript" src="html5game/IronSnout.js"></script>
+        </div>
+		<div id="bar"><div id="fill"><img id="axe" src="html5game/axe.png" alt=""></div></div>		
+		
+		<script>
+		var sdk 		= PokiSDK;
+		var pokiDebug 	= false;
+        var canvas      = document.getElementById("canvas");
+		
+		var bar 		= document.getElementById("bar");
+		var fill 		= document.getElementById("fill");
+		var axe 		= document.getElementById("axe");
+		var fakeCent	= 1;	
+		var fails		= 0;
+		var angle 		= 45;
+		
+		function poki_log(t) {
+			console.log(t);
+		}
+            
+        function poki_debug() {
+            return pokiDebug;
+        }
+		
+		function poki_loading(progress) {
+			clearInterval(fakeLoading);
+			bar_update(progress * 100);
+			sdk.gameLoadingProgress({percentageDone: progress * 0.9});
+			
+			if (progress == 1) {
+				document.body.style.background = "#e7846b";
+				bar.style.display = "none";
+				
+				setTimeout(function () {
+					canvas.style.display = "block";
+				}, 500);
+			}
+		}
+		
+		function bar_update(progress) {
+			progress = Math.max(fakeCent, progress);
+			fill.style.width = progress + "%";
+		}
+		
+		setInterval(function() {
+			angle+=5;
+			axe.style.transform = "rotate(" + angle + "deg)";
+		}, 10);		
+		
+		
+		
+		
+		var fakeLoading = setInterval(function() {
+			if (fakeCent < 60) {
+				fakeCent += 2;
+				bar_update(fakeCent);
+			} else {
+				clearInterval(fakeLoading);
+			}
+		}, 100);		
+		
+		
+		function gamemaker_start() {
+			try {
+			  GameMaker_Init();
+			} catch(err) {
+				fails++;			
+				setTimeout(gamemaker_start, 5000);
+				if (fails == 1) throw(err);						
+			}
+		}
+
+
+		
+		window.onload = function() {
+			sdk.init().then(() => {
+                setTimeout(gamemaker_start,1);
+                sdk.setDebug(pokiDebug);   
+				sdk.gameLoadingStart();		
+			}).catch(() => {
+                gamemaker_start();
+			});
+        
+            canvas.width  = window.innerWidth;
+            canvas.height = window.innerHeight;
+            canvas.addEventListener('click', function(){
+                window.focus();
+            });               
+		}
+		
+		window.addEventListener('wheel', ev => ev.preventDefault(), { passive: false });
+		window.addEventListener('keydown', ev => {
+			if (['ArrowDown', 'ArrowUp', ' '].includes(ev.key)) {
+				ev.preventDefault();
+			}
+		});		
+		</script>
+    
+
+</body></html>
