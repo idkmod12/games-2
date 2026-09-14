@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <base href="https://cdn.jsdelivr.net/gh/ccported/games@68a06c5354670671f783001244065d1b45225074/game_6393_dfb2137bb0c6d/">
+<script>
+    (function () {
+        // V6
+        var base = document.querySelector('base');
+        var CDN_BASE = base ? base.href : '';
+        if (!CDN_BASE) {
+            console.log('CDN_BASE not found.');
+            return;
+        }
+        console.log('CDN_BASE:', CDN_BASE);
+
+        // Transfer notification system
+        let transferNotification = null;
+        let hideTimeout = null;
+        let requestsToMake = 0;
+        let requestsCompleted = 0;
+        let totalBytesTransferred = 0;
+        let bytesToTransfer = 0;
+
+        function createNotification() {
+            if (transferNotification) return transferNotification;
+
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                color: white;
+                padding: 12px 16px;
+                border-radius: 8px;
+                font-family: monospace;
+                font-size: 12px;
+                z-index: 10000;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                min-width: 200px;
+                transition: all 0.3s ease;
+            `;
+            document.body.appendChild(notification);
+            transferNotification = notification;
+            return notification;
+        }
+
+        function updateNotification() {
+            if (!transferNotification) return;
+
+            const progress = requestsToMake > 0 ? (requestsCompleted / requestsToMake) * 100 : 0;
+            const transferredMB = (totalBytesTransferred / 1024 / 1024).toFixed(1);
+            const estimatedMB = (bytesToTransfer / 1024 / 1024).toFixed(1);
+
+            transferNotification.innerHTML = `
+                <div style="margin-bottom: 4px;">📦 Merging split files</div>
+                <div style="margin-bottom: 4px;">Parts: ${requestsCompleted}/${requestsToMake}</div>
+                <div style="margin-bottom: 6px;">Data: ${transferredMB}MB${bytesToTransfer > 0 ? ' / ' + estimatedMB + 'MB' : ''}</div>
+                <div style="background: rgba(255,255,255,0.2); height: 4px; border-radius: 2px; overflow: hidden;">
+                    <div style="background: #4CAF50; height: 100%; width: ${progress}%; transition: width 0.3s ease;"></div>
+                </div>
+            `;
+        }
+
+        function showNotification() {
+            const notification = createNotification();
+            notification.style.opacity = '1';
+            notification.style.transform = 'translateX(0)';
+            updateNotification();
+
+            // Clear any existing hide timeout
+            if (hideTimeout) {
+                clearTimeout(hideTimeout);
+                hideTimeout = null;
+            }
+        }
+
+        function scheduleHide() {
+            if (hideTimeout) clearTimeout(hideTimeout);
+
+            hideTimeout = setTimeout(() => {
+                if (transferNotification) {
+                    transferNotification.style.opacity = '0';
+                    transferNotification.style.transform = 'translateX(100%)';
+                    setTimeout(() => {
+                        if (transferNotification) {
+                            transferNotification.remove();
+                            transferNotification = null;
+                        }
+                        // Reset counters
+                        requestsToMake = 0;
+                        requestsCompleted = 0;
+                        totalBytesTransferred = 0;
+                        bytesToTransfer = 0;
+                    }, 300);
+                }
+            }, 5000);
+        }
+
+        function trackPartFound(partUrl) {
+            requestsToMake++;
+            showNotification();
+
+            // Asynchronously get the content-length
+            origFetch(partUrl, { method: 'HEAD' })
+                .then(response => {
+                    if (response.ok) {
+                        const contentLength = response.headers.get('content-length');
+                        if (contentLength) {
+                            bytesToTransfer += parseInt(contentLength);
+                            updateNotification();
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.log('Failed to get HEAD for', partUrl, error);
+                });
+        }
+
+        function trackPartCompleted(partSize) {
+            requestsCompleted++;
+            totalBytesTransferred += partSize;
+            updateNotification();
+
+            if (requestsCompleted >= requestsToMake) {
+                scheduleHide();
+            }
+        }
+
+        // Helper to check if a URL is relative
+        function isRelative(url) {
+            const result = typeof url === 'string' && !/^(?:[a-z]+:)?\/\//i.test(url) && url[0] !== '/';
+            return result;
+        }
+
+        // Patch fetch
+        var origFetch = window.fetch;
+        window.fetch = async function (input, init) {
+            if (typeof input === 'string' && isRelative(input)) {
+                input = CDN_BASE + input;
+            } else if (input && input.url && isRelative(input.url)) {
+                input = new Request(CDN_BASE + input.url, input);
+            }
+            const response = origFetch.call(this, input, init);
+            const res = await response;
+
+
+            if (res.status === 403) {
+                const body = await res.text();
+                const toLargeText = `File size exceeded the configured limit of 20 MB`;
+                if (body.includes(toLargeText)) {
+                    console.log('fetch: file too large, merging parts for', input instanceof Request ? input.url : input);
+                    try {
+                        return await merge(input instanceof Request ? input.url : input);
+                    } catch (mergeError) {
+                        console.error('fetch merge failed:', mergeError);
+                        return res; // Return the original 403 response
+                    }
+                } else {
+                    console.log('fetch: other 403 error');
+                    return res;
+                }
+            }
+            return res;
+        };
+
+        // Patch XMLHttpRequest
+        var OrigXHR = window.XMLHttpRequest;
+        function PatchedXHR() {
+            var xhr = new OrigXHR();
+            var origOpen = xhr.open;
+            var origSend = xhr.send;
+
+            var _url;
+            var _originalResponseType = '';
+            var _responseTypeSet = false;
+
+            xhr.open = function (method, url) {
+                if (isRelative(url)) {
+                    url = CDN_BASE + url;
+                }
+                _url = url;
+                return origOpen.apply(xhr, arguments);
+            };
+
+            // Override responseType property
+            Object.defineProperty(xhr, 'responseType', {
+                get: function () {
+                    return _originalResponseType;
+                },
+                set: function (value) {
+                    _originalResponseType = value;
+                    _responseTypeSet = true;
+                    // Set it on the actual XHR immediately for normal requests
+                    try {
+                        Object.getPrototypeOf(xhr).constructor.prototype.__lookupSetter__('responseType').call(xhr, value);
+                    } catch (e) {
+                        // Fallback if direct prototype access fails
+                        xhr.__proto__.responseType = value;
+                    }
+                },
+                configurable: true
+            });
+
+            xhr.send = function () {
+
+                var origOnReadyStateChange = xhr.onreadystatechange;
+                var origOnLoad = xhr.onload;
+                var origOnError = xhr.onerror;
+
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState === 4) {
+                        if (xhr.status === 403) {
+                            // Prevent original callbacks from firing during our check
+                            xhr.onreadystatechange = null;
+                            xhr.onload = null;
+                            xhr.onerror = null;
+
+                            // Make a separate fetch request to check the error message using original fetch
+                            origFetch(_url).then(response => {
+                                if (response.status === 403) {
+                                    return response.text().then(body => {
+                                        const toLargeText = `File size exceeded the configured limit of 20 MB`;
+
+                                        if (body.includes(toLargeText)) {
+                                            return merge(_url).then(mergedRes => {
+                                                if (_originalResponseType === 'arraybuffer') {
+                                                    return mergedRes.arrayBuffer().then(buffer => {
+                                                        // Mock successful response
+                                                        Object.defineProperty(xhr, 'status', {
+                                                            value: 200,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'response', {
+                                                            value: buffer,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'readyState', {
+                                                            value: 4,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+
+                                                        // Restore and trigger callbacks
+                                                        xhr.onreadystatechange = origOnReadyStateChange;
+                                                        xhr.onload = origOnLoad;
+                                                        xhr.onerror = origOnError;
+
+                                                        if (origOnLoad) {
+                                                            setTimeout(() => origOnLoad.call(xhr), 0);
+                                                        }
+                                                        if (origOnReadyStateChange) {
+                                                            setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                        }
+                                                    });
+                                                } else {
+                                                    return mergedRes.text().then(text => {
+                                                        Object.defineProperty(xhr, 'status', {
+                                                            value: 200,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'response', {
+                                                            value: text,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'responseText', {
+                                                            value: text,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+                                                        Object.defineProperty(xhr, 'readyState', {
+                                                            value: 4,
+                                                            configurable: true,
+                                                            writable: true
+                                                        });
+
+                                                        // Restore and trigger callbacks
+                                                        xhr.onreadystatechange = origOnReadyStateChange;
+                                                        xhr.onload = origOnLoad;
+                                                        xhr.onerror = origOnError;
+
+                                                        if (origOnLoad) {
+                                                            setTimeout(() => origOnLoad.call(xhr), 0);
+                                                        }
+                                                        if (origOnReadyStateChange) {
+                                                            setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                        }
+                                                    });
+                                                }
+                                            }).catch(mergeError => {
+                                                console.error('Merge failed:', mergeError);
+                                                // Restore callbacks and let the original 403 error through
+                                                xhr.onreadystatechange = origOnReadyStateChange;
+                                                xhr.onload = origOnLoad;
+                                                xhr.onerror = origOnError;
+                                                if (origOnReadyStateChange) {
+                                                    setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                                }
+                                            });
+                                        } else {
+                                            // Not a file size error, restore original callbacks and let it fail normally
+                                            xhr.onreadystatechange = origOnReadyStateChange;
+                                            xhr.onload = origOnLoad;
+                                            xhr.onerror = origOnError;
+                                            if (origOnReadyStateChange) {
+                                                setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    // Shouldn't happen, but restore callbacks
+                                    xhr.onreadystatechange = origOnReadyStateChange;
+                                    xhr.onload = origOnLoad;
+                                    xhr.onerror = origOnError;
+                                    if (origOnReadyStateChange) {
+                                        setTimeout(() => origOnReadyStateChange.call(xhr), 0);
+                                    }
+                                }
+                            }).catch(error => {
+                                console.error('Error checking 403 response:', error);
+                                // Restore callbacks and trigger error
+                                xhr.onreadystatechange = origOnReadyStateChange;
+                                xhr.onload = origOnLoad;
+                                xhr.onerror = origOnError;
+                                if (origOnError) {
+                                    setTimeout(() => origOnError.call(xhr), 0);
+                                }
+                            });
+
+                            return; // Don't call original callback yet
+                        }
+                    }
+
+                    if (origOnReadyStateChange) origOnReadyStateChange.call(xhr);
+                };
+
+                return origSend.apply(xhr, arguments);
+            };
+
+            return xhr;
+        }
+        PatchedXHR.prototype = OrigXHR.prototype;
+        window.XMLHttpRequest = PatchedXHR;
+
+        async function merge(filename) {
+
+            const BATCH_SIZE = 3;
+            let allParts = [];
+            let partIndex = 1;
+            let availableParts = []; // Track which parts actually exist
+
+            // First, discover all available parts
+            while (true) {
+                // Create batch of part requests to check availability
+                const batchPromises = [];
+                const batchStartIndex = partIndex;
+
+                for (let i = 0; i < BATCH_SIZE; i++) {
+                    const currentPartIndex = partIndex + i;
+                    const partFilename = `${filename}.part${currentPartIndex}`;
+
+                    batchPromises.push(
+                        origFetch(partFilename, { method: 'HEAD' })
+                            .then(response => ({
+                                index: currentPartIndex,
+                                url: partFilename,
+                                exists: response.ok
+                            }))
+                            .catch(error => ({
+                                index: currentPartIndex,
+                                url: partFilename,
+                                exists: false
+                            }))
+                    );
+                }
+
+                const batchResults = await Promise.all(batchPromises);
+                let foundInBatch = 0;
+
+                for (const result of batchResults) {
+                    if (result.exists) {
+                        availableParts.push(result.index);
+                        trackPartFound(result.url);
+                        foundInBatch++;
+                    } else {
+                        break; // Stop when we hit the first missing part
+                    }
+                }
+
+                if (foundInBatch < BATCH_SIZE) {
+                    break;
+                }
+
+                partIndex += BATCH_SIZE;
+            }
+
+            if (availableParts.length === 0) {
+                throw new Error('No parts found for merging');
+            }
+
+
+            // Now fetch all the parts we discovered in batches
+            for (let i = 0; i < availableParts.length; i += BATCH_SIZE) {
+                const batchParts = availableParts.slice(i, i + BATCH_SIZE);
+                const batchPromises = [];
+
+                for (const partIndex of batchParts) {
+                    const partFilename = `${filename}.part${partIndex}`;
+
+                    batchPromises.push(
+                        origFetch(partFilename)
+                            .then(async response => {
+                                if (response.ok) {
+                                    const partData = await response.arrayBuffer();
+                                    trackPartCompleted(partData.byteLength);
+                                    return {
+                                        index: partIndex,
+                                        data: partData,
+                                        success: true
+                                    };
+                                } else {
+                                    throw new Error(`Failed to fetch part ${partIndex}`);
+                                }
+                            })
+                            .catch(error => ({
+                                index: partIndex,
+                                data: null,
+                                success: false,
+                                error: error
+                            }))
+                    );
+                }
+
+                const batchResults = await Promise.all(batchPromises);
+
+                // Process batch results
+                for (const result of batchResults) {
+                    if (result.success) {
+                        allParts.push({
+                            index: result.index,
+                            data: result.data
+                        });
+                    } else {
+                        console.error(`Failed to fetch part ${result.index}:`, result.error);
+                        throw new Error(`Failed to fetch part ${result.index}`);
+                    }
+                }
+            }
+
+            // Sort parts by index to ensure correct order
+            allParts.sort((a, b) => a.index - b.index);
+
+            const totalSize = allParts.reduce((acc, part) => acc + part.data.byteLength, 0);
+            const combinedData = new Uint8Array(totalSize);
+
+            let offset = 0;
+            for (const part of allParts) {
+                combinedData.set(new Uint8Array(part.data), offset);
+                offset += part.data.byteLength;
+            }
+
+            return new Response(combinedData);
+        }
+
+
+        if (navigator && navigator.serviceWorker) {
+            const oldRegister = navigator.serviceWorker.register;
+            navigator.serviceWorker.register = async function (scriptURL, options) {
+                if (scriptURL && typeof scriptURL === 'string') {
+                    if (isRelative(scriptURL)) {
+                        const cdnURL = CDN_BASE + scriptURL;
+                        console.log('Service worker needs CDN URL:', cdnURL);
+                        
+                        // Create a proxy service worker that imports from CDN
+                        // Since service workers must be same-origin, we create a local proxy
+                        const proxyWorkerCode = `
+                            // Proxy service worker for CDN content
+                            self.addEventListener('install', function(event) {
+                                console.log('Proxy service worker installing');
+                                self.skipWaiting();
+                            });
+
+                            self.addEventListener('activate', function(event) {
+                                console.log('Proxy service worker activating');
+                                event.waitUntil(self.clients.claim());
+                            });
+
+                            // Import and execute the actual service worker from CDN
+                            fetch('${cdnURL}')
+                                .then(response => response.text())
+                                .then(code => {
+                                    // Execute the CDN service worker code in this context
+                                    eval(code);
+                                })
+                                .catch(error => {
+                                    console.error('Failed to load service worker from CDN:', error);
+                                });
+                        `;
+                        
+                        const blob = new Blob([proxyWorkerCode], { type: 'application/javascript' });
+                        const blobURL = URL.createObjectURL(blob);
+                        console.log('Proxy service worker blob created:', blobURL);
+                        return oldRegister.call(navigator.serviceWorker, blobURL, options);
+                    }
+                }
+                return oldRegister.call(navigator.serviceWorker, scriptURL, options);
+            }
+        }
+
+        // Patch Worker to allow remote origins
+        if (window.Worker) {
+            const OrigWorker = window.Worker;
+            window.Worker = function (scriptURL, options) {
+                // Don't patch blob URLs or data URLs - they're already valid
+                if (scriptURL && typeof scriptURL === 'string' && 
+                    !scriptURL.startsWith('blob:') && 
+                    !scriptURL.startsWith('data:') && 
+                    isRelative(scriptURL)) {
+                    scriptURL = CDN_BASE + scriptURL;
+                    console.log('Worker scriptURL patched to:', scriptURL);
+                }
+                
+                // If scriptURL is remote HTTPS/HTTP, we need to fetch and create data URL
+                if (typeof scriptURL === 'string' && /^https?:\/\//.test(scriptURL)) {
+                    console.log(scriptURL, 'is remote, creating data URL worker');
+                    
+                    // Extract the base URL for the worker to use
+                    const workerBaseURL = scriptURL.substring(0, scriptURL.lastIndexOf('/') + 1);
+                    
+                    // Create a worker with CDN context and fetch patching
+                    const workerCode = `
+                        // Set up CDN base for this worker
+                        const WORKER_CDN_BASE = '${workerBaseURL}';
+                        
+                        // Patch fetch in worker context to handle relative URLs
+                        const origWorkerFetch = self.fetch;
+                        self.fetch = function(input, init) {
+                            if (typeof input === 'string' && !/^(?:[a-z]+:)?\\/\\//i.test(input) && input[0] !== '/') {
+                                // Relative URL, prepend CDN base
+                                input = WORKER_CDN_BASE + input;
+                                console.log('Worker fetch patched to:', input);
+                            }
+                            return origWorkerFetch.call(this, input, init);
+                        };
+                        
+                        // Load the actual worker script
+                        fetch('${scriptURL}')
+                            .then(response => response.text())
+                            .then(code => {
+                                console.log('Worker script loaded, executing...');
+                                // Execute the CDN worker code with patched fetch
+                                eval(code);
+                            })
+                            .catch(error => {
+                                console.error('Failed to load worker script from CDN:', error);
+                                self.postMessage({error: 'Failed to load worker script', details: error.message});
+                            });
+                    `;
+                    
+                    // Create data URL instead of blob
+                    const encodedWorkerCode = encodeURIComponent(workerCode);
+                    const dataURL = `data:application/javascript,${encodedWorkerCode}`;
+                    return new OrigWorker(dataURL, options);
+                }
+                return new OrigWorker(scriptURL, options);
+            };
+            window.Worker.prototype = OrigWorker.prototype;
+        }
+    })();
+</script>
+    <meta charset="UTF-8" />
+    <title>Stack</title>
+    <script type="text/javascript">
+      function disableselect(e) {
+        return false;
+      }
+
+      function reEnable() {
+        return true;
+      }
+
+      //if IE4+
+      document.onselectstart = new Function("return false");
+      document.oncontextmenu = new Function("return false");
+      //if NS6
+      if (window.sidebar) {
+        document.onmousedown = disableselect;
+        document.onclick = reEnable;
+      }
+    </script>
+    <style>
+      @import url("https://fonts.googleapis.com/css?family=Comfortaa");
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        height: 100%;
+        width: 100%;
+        position: relative;
+        font-family: "Comfortaa", cursive;
+      }
+
+      #container {
+        width: 100%;
+        height: 100%;
+      }
+      #container #score {
+        position: absolute;
+        top: 20px;
+        width: 100%;
+        text-align: center;
+        font-size: 10vh;
+        -webkit-transition: -webkit-transform 0.5s ease;
+        transition: -webkit-transform 0.5s ease;
+        transition: transform 0.5s ease;
+        transition: transform 0.5s ease, -webkit-transform 0.5s ease;
+        color: #333344;
+        -webkit-transform: translatey(-200px) scale(1);
+        transform: translatey(-200px) scale(1);
+      }
+      #container #game {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+      }
+      #container .game-over {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 85%;
+        display: -webkit-box;
+        display: flex;
+        -webkit-box-orient: vertical;
+        -webkit-box-direction: normal;
+        flex-direction: column;
+        -webkit-box-align: center;
+        align-items: center;
+        -webkit-box-pack: center;
+        justify-content: center;
+      }
+      #container .game-over * {
+        -webkit-transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease,
+          -webkit-transform 0.5s ease;
+        opacity: 0;
+        -webkit-transform: translatey(-50px);
+        transform: translatey(-50px);
+        color: #333344;
+      }
+      #container .game-over h2 {
+        margin: 0;
+        padding: 0;
+        font-size: 40px;
+      }
+      #container .game-ready {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: -webkit-box;
+        display: flex;
+        -webkit-box-orient: vertical;
+        -webkit-box-direction: normal;
+        flex-direction: column;
+        -webkit-box-align: center;
+        align-items: center;
+        justify-content: space-around;
+      }
+      #container .game-ready #start-button {
+        -webkit-transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease,
+          -webkit-transform 0.5s ease;
+        opacity: 0;
+        -webkit-transform: translatey(-50px);
+        transform: translatey(-50px);
+        border: 3px solid #333344;
+        padding: 10px 20px;
+        background-color: transparent;
+        color: #333344;
+        font-size: 30px;
+      }
+      #container #instructions {
+        position: absolute;
+        width: 100%;
+        top: 16vh;
+        left: 0;
+        text-align: center;
+        -webkit-transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, -webkit-transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease;
+        transition: opacity 0.5s ease, transform 0.5s ease,
+          -webkit-transform 0.5s ease;
+        opacity: 0;
+      }
+      #container #instructions.hide {
+        opacity: 0 !important;
+      }
+      #container.playing #score,
+      #container.resetting #score {
+        -webkit-transform: translatey(0px) scale(1);
+        transform: translatey(0px) scale(1);
+      }
+      #container.playing #instructions {
+        opacity: 1;
+      }
+      #container.ready .game-ready #start-button {
+        opacity: 1;
+        -webkit-transform: translatey(0);
+        transform: translatey(0);
+      }
+      #container.ended #score {
+        -webkit-transform: translatey(6vh) scale(1.5);
+        transform: translatey(6vh) scale(1.5);
+      }
+      #container.ended .game-over * {
+        opacity: 1;
+        -webkit-transform: translatey(0);
+        transform: translatey(0);
+      }
+      #container.ended .game-over p {
+        -webkit-transition-delay: 0.3s;
+        transition-delay: 0.3s;
+      }
+    </style>
+    <script>
+      window.console = window.console || function (t) {};
+    </script>
+    <script>
+      if (document.location.search.match(/type=embed/gi)) {
+        window.parent.postMessage("resize", "*");
+      }
+    </script>
+  </head>
+  <body oncontextmenu="return false;" id="ancss">
+    <meta name="viewport" content="width=device-width,user-scalable=no" />
+    <div id="container">
+      <div id="game"></div>
+      <div id="score">0</div>
+      <div id="instructions">
+        Click (or press the spacebar) to place the block
+      </div>
+      <div class="game-over">
+        <h2>Game Over</h2>
+        <p>You did great, you're the best.</p>
+        <p>Click or spacebar to start again</p>
+      </div>
+      <div class="game-ready">
+        <div id="start-button">Start</div>
+        <div></div>
+      </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r83/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/latest/TweenMax.min.js"></script>
+    <script id="rendered-js">
+      "use strict";
+      console.clear();
+      var Stage = /** @class */ (function () {
+        function Stage() {
+          // container
+          var _this = this;
+          this.render = function () {
+            this.renderer.render(this.scene, this.camera);
+          };
+          this.add = function (elem) {
+            this.scene.add(elem);
+          };
+          this.remove = function (elem) {
+            this.scene.remove(elem);
+          };
+          this.container = document.getElementById("game");
+          // renderer
+          this.renderer = new THREE.WebGLRenderer({
+            antialias: true,
+            alpha: false,
+          });
+
+          this.renderer.setSize(window.innerWidth, window.innerHeight);
+          this.renderer.setClearColor("#D0CBC7", 1);
+          this.container.appendChild(this.renderer.domElement);
+          // scene
+          this.scene = new THREE.Scene();
+          // camera
+          var aspect = window.innerWidth / window.innerHeight;
+          var d = 20;
+          this.camera = new THREE.OrthographicCamera(
+            -d * aspect,
+            d * aspect,
+            d,
+            -d,
+            -100,
+            1000
+          );
+          this.camera.position.x = 2;
+          this.camera.position.y = 2;
+          this.camera.position.z = 2;
+          this.camera.lookAt(new THREE.Vector3(0, 0, 0));
+          //light
+          this.light = new THREE.DirectionalLight(0xffffff, 0.5);
+          this.light.position.set(0, 499, 0);
+          this.scene.add(this.light);
+          this.softLight = new THREE.AmbientLight(0xffffff, 0.4);
+          this.scene.add(this.softLight);
+          window.addEventListener("resize", function () {
+            return _this.onResize();
+          });
+          this.onResize();
+        }
+        Stage.prototype.setCamera = function (y, speed) {
+          if (speed === void 0) {
+            speed = 0.3;
+          }
+          TweenLite.to(this.camera.position, speed, {
+            y: y + 4,
+            ease: Power1.easeInOut,
+          });
+          TweenLite.to(this.camera.lookAt, speed, {
+            y: y,
+            ease: Power1.easeInOut,
+          });
+        };
+        Stage.prototype.onResize = function () {
+          var viewSize = 30;
+          this.renderer.setSize(window.innerWidth, window.innerHeight);
+          this.camera.left = window.innerWidth / -viewSize;
+          this.camera.right = window.innerWidth / viewSize;
+          this.camera.top = window.innerHeight / viewSize;
+          this.camera.bottom = window.innerHeight / -viewSize;
+          this.camera.updateProjectionMatrix();
+        };
+        return Stage;
+      })();
+      var Block = /** @class */ (function () {
+        function Block(block) {
+          // set size and position
+          this.STATES = {
+            ACTIVE: "active",
+            STOPPED: "stopped",
+            MISSED: "missed",
+          };
+          this.MOVE_AMOUNT = 12;
+          this.dimension = { width: 0, height: 0, depth: 0 };
+          this.position = { x: 0, y: 0, z: 0 };
+          this.targetBlock = block;
+          this.index = (this.targetBlock ? this.targetBlock.index : 0) + 1;
+          this.workingPlane = this.index % 2 ? "x" : "z";
+          this.workingDimension = this.index % 2 ? "width" : "depth";
+          // set the dimensions from the target block, or defaults.
+          this.dimension.width = this.targetBlock
+            ? this.targetBlock.dimension.width
+            : 10;
+          this.dimension.height = this.targetBlock
+            ? this.targetBlock.dimension.height
+            : 2;
+          this.dimension.depth = this.targetBlock
+            ? this.targetBlock.dimension.depth
+            : 10;
+          this.position.x = this.targetBlock ? this.targetBlock.position.x : 0;
+          this.position.y = this.dimension.height * this.index;
+          this.position.z = this.targetBlock ? this.targetBlock.position.z : 0;
+          this.colorOffset = this.targetBlock
+            ? this.targetBlock.colorOffset
+            : Math.round(Math.random() * 100);
+          // set color
+          if (!this.targetBlock) {
+            this.color = 0x333344;
+          } else {
+            var offset = this.index + this.colorOffset;
+            var r = Math.sin(0.3 * offset) * 55 + 200;
+            var g = Math.sin(0.3 * offset + 2) * 55 + 200;
+            var b = Math.sin(0.3 * offset + 4) * 55 + 200;
+            this.color = new THREE.Color(r / 255, g / 255, b / 255);
+          }
+          // state
+          this.state =
+            this.index > 1 ? this.STATES.ACTIVE : this.STATES.STOPPED;
+          // set direction
+          this.speed = -0.1 - this.index * 0.005;
+          if (this.speed < -4) this.speed = -4;
+          this.direction = this.speed;
+          // create block
+          var geometry = new THREE.BoxGeometry(
+            this.dimension.width,
+            this.dimension.height,
+            this.dimension.depth
+          );
+          geometry.applyMatrix(
+            new THREE.Matrix4().makeTranslation(
+              this.dimension.width / 2,
+              this.dimension.height / 2,
+              this.dimension.depth / 2
+            )
+          );
+          this.material = new THREE.MeshToonMaterial({
+            color: this.color,
+            shading: THREE.FlatShading,
+          });
+          this.mesh = new THREE.Mesh(geometry, this.material);
+          this.mesh.position.set(
+            this.position.x,
+            this.position.y + (this.state == this.STATES.ACTIVE ? 0 : 0),
+            this.position.z
+          );
+          if (this.state == this.STATES.ACTIVE) {
+            this.position[this.workingPlane] =
+              Math.random() > 0.5 ? -this.MOVE_AMOUNT : this.MOVE_AMOUNT;
+          }
+        }
+        Block.prototype.reverseDirection = function () {
+          this.direction =
+            this.direction > 0 ? this.speed : Math.abs(this.speed);
+        };
+        Block.prototype.place = function () {
+          this.state = this.STATES.STOPPED;
+          var overlap =
+            this.targetBlock.dimension[this.workingDimension] -
+            Math.abs(
+              this.position[this.workingPlane] -
+                this.targetBlock.position[this.workingPlane]
+            );
+          var blocksToReturn = {
+            plane: this.workingPlane,
+            direction: this.direction,
+          };
+
+          if (this.dimension[this.workingDimension] - overlap < 0.3) {
+            overlap = this.dimension[this.workingDimension];
+            blocksToReturn.bonus = true;
+            this.position.x = this.targetBlock.position.x;
+            this.position.z = this.targetBlock.position.z;
+            this.dimension.width = this.targetBlock.dimension.width;
+            this.dimension.depth = this.targetBlock.dimension.depth;
+          }
+          if (overlap > 0) {
+            var choppedDimensions = {
+              width: this.dimension.width,
+              height: this.dimension.height,
+              depth: this.dimension.depth,
+            };
+            choppedDimensions[this.workingDimension] -= overlap;
+            this.dimension[this.workingDimension] = overlap;
+            var placedGeometry = new THREE.BoxGeometry(
+              this.dimension.width,
+              this.dimension.height,
+              this.dimension.depth
+            );
+            placedGeometry.applyMatrix(
+              new THREE.Matrix4().makeTranslation(
+                this.dimension.width / 2,
+                this.dimension.height / 2,
+                this.dimension.depth / 2
+              )
+            );
+            var placedMesh = new THREE.Mesh(placedGeometry, this.material);
+            var choppedGeometry = new THREE.BoxGeometry(
+              choppedDimensions.width,
+              choppedDimensions.height,
+              choppedDimensions.depth
+            );
+            choppedGeometry.applyMatrix(
+              new THREE.Matrix4().makeTranslation(
+                choppedDimensions.width / 2,
+                choppedDimensions.height / 2,
+                choppedDimensions.depth / 2
+              )
+            );
+            var choppedMesh = new THREE.Mesh(choppedGeometry, this.material);
+            var choppedPosition = {
+              x: this.position.x,
+              y: this.position.y,
+              z: this.position.z,
+            };
+
+            if (
+              this.position[this.workingPlane] <
+              this.targetBlock.position[this.workingPlane]
+            ) {
+              this.position[this.workingPlane] =
+                this.targetBlock.position[this.workingPlane];
+            } else {
+              choppedPosition[this.workingPlane] += overlap;
+            }
+            placedMesh.position.set(
+              this.position.x,
+              this.position.y,
+              this.position.z
+            );
+            choppedMesh.position.set(
+              choppedPosition.x,
+              choppedPosition.y,
+              choppedPosition.z
+            );
+            blocksToReturn.placed = placedMesh;
+            if (!blocksToReturn.bonus) blocksToReturn.chopped = choppedMesh;
+          } else {
+            this.state = this.STATES.MISSED;
+          }
+          this.dimension[this.workingDimension] = overlap;
+          return blocksToReturn;
+        };
+        Block.prototype.tick = function () {
+          if (this.state == this.STATES.ACTIVE) {
+            var value = this.position[this.workingPlane];
+            if (value > this.MOVE_AMOUNT || value < -this.MOVE_AMOUNT)
+              this.reverseDirection();
+            this.position[this.workingPlane] += this.direction;
+            this.mesh.position[this.workingPlane] =
+              this.position[this.workingPlane];
+          }
+        };
+        return Block;
+      })();
+      var Game = /** @class */ (function () {
+        function Game() {
+          var _this = this;
+          this.STATES = {
+            LOADING: "loading",
+            PLAYING: "playing",
+            READY: "ready",
+            ENDED: "ended",
+            RESETTING: "resetting",
+          };
+
+          this.blocks = [];
+          this.state = this.STATES.LOADING;
+          this.stage = new Stage();
+          this.mainContainer = document.getElementById("container");
+          this.scoreContainer = document.getElementById("score");
+          this.startButton = document.getElementById("start-button");
+          this.instructions = document.getElementById("instructions");
+          this.scoreContainer.innerHTML = "0";
+          this.newBlocks = new THREE.Group();
+          this.placedBlocks = new THREE.Group();
+          this.choppedBlocks = new THREE.Group();
+          this.stage.add(this.newBlocks);
+          this.stage.add(this.placedBlocks);
+          this.stage.add(this.choppedBlocks);
+          this.addBlock();
+          this.tick();
+          this.updateState(this.STATES.READY);
+          document.addEventListener("keydown", function (e) {
+            if (e.keyCode == 32) _this.onAction();
+          });
+          document.addEventListener("click", function (e) {
+            _this.onAction();
+          });
+          document.addEventListener("touchstart", function (e) {
+            e.preventDefault();
+            // this.onAction();
+            // ☝️ this triggers after click on android so you
+            // insta-lose, will figure it out later.
+          });
+        }
+        Game.prototype.updateState = function (newState) {
+          for (var key in this.STATES)
+            this.mainContainer.classList.remove(this.STATES[key]);
+          this.mainContainer.classList.add(newState);
+          this.state = newState;
+        };
+        Game.prototype.onAction = function () {
+          switch (this.state) {
+            case this.STATES.READY:
+              this.startGame();
+              break;
+            case this.STATES.PLAYING:
+              this.placeBlock();
+              break;
+            case this.STATES.ENDED:
+              this.restartGame();
+              break;
+          }
+        };
+        Game.prototype.startGame = function () {
+          if (this.state != this.STATES.PLAYING) {
+            this.scoreContainer.innerHTML = "0";
+            this.updateState(this.STATES.PLAYING);
+            this.addBlock();
+          }
+        };
+        Game.prototype.restartGame = function () {
+          var _this = this;
+          this.updateState(this.STATES.RESETTING);
+          var oldBlocks = this.placedBlocks.children;
+          var removeSpeed = 0.2;
+          var delayAmount = 0.02;
+          var _loop_1 = function (i) {
+            TweenLite.to(oldBlocks[i].scale, removeSpeed, {
+              x: 0,
+              y: 0,
+              z: 0,
+              delay: (oldBlocks.length - i) * delayAmount,
+              ease: Power1.easeIn,
+              onComplete: function () {
+                return _this.placedBlocks.remove(oldBlocks[i]);
+              },
+            });
+            TweenLite.to(oldBlocks[i].rotation, removeSpeed, {
+              y: 0.5,
+              delay: (oldBlocks.length - i) * delayAmount,
+              ease: Power1.easeIn,
+            });
+          };
+          for (var i = 0; i < oldBlocks.length; i++) {
+            _loop_1(i);
+          }
+          var cameraMoveSpeed =
+            removeSpeed * 2 + oldBlocks.length * delayAmount;
+          this.stage.setCamera(2, cameraMoveSpeed);
+          var countdown = { value: this.blocks.length - 1 };
+          TweenLite.to(countdown, cameraMoveSpeed, {
+            value: 0,
+            onUpdate: function () {
+              _this.scoreContainer.innerHTML = String(
+                Math.round(countdown.value)
+              );
+            },
+          });
+          this.blocks = this.blocks.slice(0, 1);
+          setTimeout(function () {
+            _this.startGame();
+          }, cameraMoveSpeed * 1000);
+        };
+        Game.prototype.placeBlock = function () {
+          var _this = this;
+          var currentBlock = this.blocks[this.blocks.length - 1];
+          var newBlocks = currentBlock.place();
+          this.newBlocks.remove(currentBlock.mesh);
+          if (newBlocks.placed) this.placedBlocks.add(newBlocks.placed);
+          if (newBlocks.chopped) {
+            this.choppedBlocks.add(newBlocks.chopped);
+            var positionParams = {
+              y: "-=30",
+              ease: Power1.easeIn,
+              onComplete: function () {
+                return _this.choppedBlocks.remove(newBlocks.chopped);
+              },
+            };
+            var rotateRandomness = 10;
+            var rotationParams = {
+              delay: 0.05,
+              x:
+                newBlocks.plane == "z"
+                  ? Math.random() * rotateRandomness - rotateRandomness / 2
+                  : 0.1,
+              z:
+                newBlocks.plane == "x"
+                  ? Math.random() * rotateRandomness - rotateRandomness / 2
+                  : 0.1,
+              y: Math.random() * 0.1,
+            };
+
+            if (
+              newBlocks.chopped.position[newBlocks.plane] >
+              newBlocks.placed.position[newBlocks.plane]
+            ) {
+              positionParams[newBlocks.plane] =
+                "+=" + 40 * Math.abs(newBlocks.direction);
+            } else {
+              positionParams[newBlocks.plane] =
+                "-=" + 40 * Math.abs(newBlocks.direction);
+            }
+            TweenLite.to(newBlocks.chopped.position, 1, positionParams);
+            TweenLite.to(newBlocks.chopped.rotation, 1, rotationParams);
+          }
+          this.addBlock();
+        };
+        Game.prototype.addBlock = function () {
+          var lastBlock = this.blocks[this.blocks.length - 1];
+          if (lastBlock && lastBlock.state == lastBlock.STATES.MISSED) {
+            return this.endGame();
+          }
+          this.scoreContainer.innerHTML = String(this.blocks.length - 1);
+          var newKidOnTheBlock = new Block(lastBlock);
+          this.newBlocks.add(newKidOnTheBlock.mesh);
+          this.blocks.push(newKidOnTheBlock);
+          this.stage.setCamera(this.blocks.length * 2);
+          if (this.blocks.length >= 5) this.instructions.classList.add("hide");
+        };
+        Game.prototype.endGame = function () {
+          this.updateState(this.STATES.ENDED);
+        };
+        Game.prototype.tick = function () {
+          var _this = this;
+          this.blocks[this.blocks.length - 1].tick();
+          this.stage.render();
+          requestAnimationFrame(function () {
+            _this.tick();
+          });
+        };
+        return Game;
+      })();
+      var game = new Game();
+    </script>
+  </body>
+</html>
