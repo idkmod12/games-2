@@ -1,5 +1,5 @@
 var UnityLoader = UnityLoader || {
-    compatibilityCheck: function(e, t, r) { UnityLoader.SystemInfo.hasWebGL ? UnityLoader.SystemInfo.mobile ? e.popup("Please note that Unity WebGL is not currently supported on mobiles. Press OK if you wish to continue anyway.", [{ text: "OK", callback: t }]) : ["Firefox", "Chrome", "Safari"].indexOf(UnityLoader.SystemInfo.browser) == -1 ? e.popup("Please note that your browser is not currently supported for this Unity WebGL content. Press OK if you wish to continue anyway.", [{ text: "OK", callback: t }]) : t() : e.popup("Your browser does not support WebGL", [{ text: "OK", callback: r }]) },
+    compatibilityCheck: function(e, t, r) { UnityLoader.SystemInfo.hasWebGL ? t() : e.popup("Your browser does not support WebGL", [{ text: "OK", callback: r }]) },
     Blobs: {},
     loadCode: function(e, t, r) { var n = [].slice.call(UnityLoader.Cryptography.md5(e)).map(function(e) { return ("0" + e.toString(16)).substr(-2) }).join(""),
             o = document.createElement("script"),
