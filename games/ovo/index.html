@@ -1,10 +1,10 @@
 <!DOCTYPE html><html><head>
-    <base href="https://cdn.jsdelivr.net/gh/ccported/games@68a06c5354670671f783001244065d1b45225074/game_a1c4_5e86a51943679/">
+    <base href="./">
 <script>
     (function () {
         // V6
         var base = document.querySelector('base');
-        var CDN_BASE = base ? base.href : '';
+        var CDN_BASE = 'https://cdn.jsdelivr.net/gh/ccported/games@68a06c5354670671f783001244065d1b45225074/game_a1c4_5e86a51943679/';
         if (!CDN_BASE) {
             console.log('CDN_BASE not found.');
             return;
@@ -1992,9 +1992,9 @@
             -ms-touch-action: none;
         }
     </style>
-    <link href="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/animate.css" rel="stylesheet" type="text/css">
-    <link href="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/hmmg_layoutTransition.css" rel="stylesheet" type="text/css">
-    <link href="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/jquery.gritter.css" rel="stylesheet" type="text/css">
+    <link href="animate.css" rel="stylesheet" type="text/css">
+    <link href="hmmg_layoutTransition.css" rel="stylesheet" type="text/css">
+    <link href="jquery.gritter.css" rel="stylesheet" type="text/css">
     <meta charset="UTF-8">
     <meta content="IE=edge,chrome=1" http-equiv="X-UA-Compatible">
 
@@ -2021,8 +2021,7 @@
                         window.ccPorted = {
                             gameID: "undefined"
                         }
-                        script.src = '/big_game_script.js?cacheBust='+new Date().getTime();
-                        document.head.appendChild(script);
+                        // Standalone build: portal integration is intentionally omitted.
                     })()</script></head>
 
 <body dir="ltr">
@@ -2061,18 +2060,18 @@
     <!-- Pages load faster with scripts at the bottom -->
 
     <!-- Construct 2 exported games require jQuery. -->
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/jquery-3.4.1.min.js"></script>
+    <script src="jquery-3.4.1.min.js"></script>
 
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/GameAnalytics.js"></script>
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/Tween.js"></script>
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/html2canvas.min.js"></script>
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/jquery.gritter.js"></script>
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/howler.js"></script>
+    <script src="GameAnalytics.js"></script>
+    <script src="Tween.js"></script>
+    <script src="html2canvas.min.js"></script>
+    <script src="jquery.gritter.js"></script>
+    <script src="howler.js"></script>
 
 
     <!-- The runtime script.  You can rename it, but don't forget to rename the reference here as well.
     This file will have been minified and obfuscated if you enabled "Minify script" during export. -->
-    <script src="https://427396048-642845047394716217.preview.editmysite.com/uploads/b/139890129-761103484729797659/files/c2runtime.js"></script>
+    <script src="c2runtime.js"></script>
 
     <script>
         // Start the Construct 2 project running on window load.
@@ -2100,21 +2099,7 @@
 
         // Runtime calls this global method when ready to start caching (i.e. after startup).
         // This registers the service worker which caches resources for offline support.
-        window.C2_RegisterSW = function C2_RegisterSW() {
-            if (!navigator.serviceWorker)
-                return;		// no SW support, ignore call
-
-            try {
-                navigator.serviceWorker.register("sw.js", { scope: "./" })
-                    .then(function (reg) {
-                        console.log("Registered service worker on " + reg.scope);
-                    })
-                    .catch(OnRegisterSWError);
-            }
-            catch (e) {
-                OnRegisterSWError(e);
-            }
-        };
+        window.C2_RegisterSW = function C2_RegisterSW() { /* disabled for standalone hosting */ };
     </script>
     <script>gadgets.util.runOnLoadHandlers();</script>
     <script>window.google.csi.tickDl();
